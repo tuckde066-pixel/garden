@@ -195,6 +195,10 @@ const CONFIG = {
   MARKER_RANGE: 70,        // 꽃 위 표시가 보이는 거리
   SEASON: 'auto',          // 'auto'면 오늘 날짜로. 'spring' 'summer' 'autumn' 'winter'로 고정 가능 (주소 뒤 ?season=winter 로도 확인 가능)
   USE_IMAGES: false,       // 직접 그린 도트 PNG(24×32)를 flowers/ 폴더에 넣었으면 true
+  // 모두가 같은 정원을 쓰려면 Supabase 프로젝트 주소와 공개용 키를 넣기 (비워 두면 혼자 정원)
+  // 공개용 키(anon 또는 publishable)는 넣어도 괜찮지만, service_role / secret 키는 절대 넣지 않기
+  SUPABASE_URL: 'https://fyuzzufxlxhrkerzjkir.supabase.co',
+  SUPABASE_KEY: 'sb_publishable_7LapS-c_JgBDSsfJf-EGZg_KVHgFUrE',
   STORAGE_KEY: 'garden-pixel-v1',
 };
 
@@ -311,7 +315,18 @@ function load() {
   } catch (e) {}
   return { flowers: [], player: { x: 0, z: 8, yaw: 0 } };
 }
-function save() { try { localStorage.setItem(CONFIG.STORAGE_KEY, JSON.stringify(state)); } catch (e) {} }
+let online = null;               // Supabase 연결 (20번). 연결되면 모두가 같은 정원
+const myLast = (() => { try { return JSON.parse(localStorage.getItem('garden-mylast')) || {}; } catch (e) { return {}; } })();
+const me = (() => {              // 이 브라우저를 구분하는 번호 (로그인 대신)
+  try { let v = localStorage.getItem('garden-visitor'); if (!v) { v = 'v-' + crypto.randomUUID(); localStorage.setItem('garden-visitor', v); } return v; }
+  catch (e) { return 'v-' + Math.random().toString(36).slice(2) + Date.now().toString(36); }
+})();
+function save() {
+  try {
+    if (online) { localStorage.setItem(CONFIG.STORAGE_KEY + '-online', JSON.stringify({ player: state.player })); localStorage.setItem('garden-mylast', JSON.stringify(myLast)); }
+    else localStorage.setItem(CONFIG.STORAGE_KEY, JSON.stringify(state));
+  } catch (e) {}
+}
 
 /* ═════════ 8. 땅의 모양: 언덕, 시냇물, 오솔길, 호수 ═════════ */
 const LAKE = { x: 38, z: -34, r: 22 };
@@ -954,7 +969,7 @@ function updateSubtitle() {
   const n = state.flowers.length;
   const thirsty = state.flowers.filter(f => stageOf(f) < 3 && ready(f)).length;
   document.getElementById('subtitle').textContent =
-    (n === 0 ? `${SEASONS[SEASON]} 정원 · 마음에 드는 곳에 꽃을 심어 보세요` : `${SEASONS[SEASON]} · 꽃 ${n}송이 · 물이 필요한 꽃 ${thirsty}송이`) + together;
+    (n === 0 ? `${SEASONS[SEASON]} 정원 · 마음에 드는 곳에 꽃을 심어 보세요` : `${SEASONS[SEASON]}${online ? ' · 모두의 정원' : ''} · 꽃 ${n}송이 · 물이 필요한 꽃 ${thirsty}송이`) + together;
 }
 updateSubtitle();
 const hint = document.getElementById('hint');
@@ -1119,7 +1134,8 @@ function setPlanting(on) {
   reachRing.visible = on;
 }
 btnPlant.addEventListener('click', () => {
-  if (!planting && state.flowers.length >= CONFIG.MAX_FLOWERS) { toast('정원이 가득 찼어요'); return; }
+  const mine = online ? state.flowers.filter(f => f.mine).length : state.flowers.length;
+  if (!planting && mine >= CONFIG.MAX_FLOWERS) { toast(`한 사람당 ${CONFIG.MAX_FLOWERS}송이까지 심을 수 있어요`); return; }
   setPlanting(!planting);
   if (planting) toast(`동그라미 안을 누르면 ${SEASONS[SEASON]} 꽃이 심겨요`);
 });
@@ -1153,6 +1169,7 @@ function tap(sx, sy) {
   if (state.flowers.some(f => Math.hypot(f.x - x, f.z - z) < 0.9)) { toast('옆 꽃과 너무 가까워요'); return; }
 
   const kind = SEASON_KINDS[Math.floor(Math.random() * SEASON_KINDS.length)];
+  if (online) { plantOnline(kind, x, z); return; }
   const f = { id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6), kind: kind.id, x, z, water: 0, last: 0 };
   state.flowers.push(f);
   save(); placeFlower(f);
@@ -1179,6 +1196,7 @@ function water(f) {
   const wait = CONFIG.COOLDOWN_SEC * 1000 - (Date.now() - f.last);
   if (wait > 0) { toast(`조금 쉬었다가 다시 와요 · ${Math.ceil(wait / 1000)}초`); return; }
   if (stageOf(f) === 3) { openCard(f); return; }
+  if (online) { waterOnline(f); return; }
   const before = stageOf(f);
   f.water += 1; f.last = Date.now();
   const after = stageOf(f);
@@ -1439,9 +1457,10 @@ document.getElementById('btn-invite').addEventListener('click', async () => {
     return;
   }
   try {
-    if (navigator.share) { await navigator.share({ title: '같이 물 주는 정원', text: '내 꽃에 물 주러 와줘', url: location.href }); return; }
+    if (navigator.share) { await navigator.share({ title: '같이 물 주는 정원', text: '내 꽃에 물 주러 와줘', url: location.href.split('#')[0] }); return; }
   } catch (e) { if (e.name === 'AbortError') return; }
-  openInvite('아래 링크를 친구에게 보내 주세요.<br>친구가 내 꽃에 물을 주는 건 2단계에서 열려요.');
+  openInvite(online ? '이 링크로 들어온 사람은 모두 같은 정원에 들어와요.<br>내 꽃에 물을 주러 와 달라고 보내 보세요.'
+                    : '아래 링크를 친구에게 보내 주세요.<br>지금은 각자의 정원이라 서로의 꽃은 안 보여요.');
 });
 document.getElementById('invite-close').addEventListener('click', () => inviteBox.classList.remove('open'));
 document.getElementById('invite-copy').addEventListener('click', async () => {
@@ -1449,7 +1468,7 @@ document.getElementById('invite-copy').addEventListener('click', async () => {
   catch (e) { inviteLink.select(); document.execCommand && document.execCommand('copy'); toast('링크를 복사했어요'); }
 });
 
-let resetArmed = 0;
+let resetArmed = 0;   // 함께 정원에서는 20번에서 이 버튼을 숨김
 document.getElementById('reset').addEventListener('click', () => {
   if (state.flowers.length && !(resetArmed && Date.now() - resetArmed < 3000)) {
     resetArmed = Date.now(); toast('한 번 더 누르면 정원이 비워져요'); return;
@@ -1465,11 +1484,11 @@ document.getElementById('reset').addEventListener('click', () => {
    같은 페이지를 연 사람끼리 정원사 위치를 주고받음. 저장되지 않고, 나가면 사라짐.
    room을 쓸 수 없는 곳(내 컴퓨터에서 연 파일 등)에서는 혼자 정원으로 그대로 돌아감 */
 const BANDS = ['#4FA0C8', '#F2B43A', '#9B7BE0', '#5FB650', '#E8742E', '#E46F93'];
-function syncPeers(peers) {
+// list: [{ peer: 구분 이름, g: [x, z, 바라보는 방향] }] (나는 빼고)
+function syncPeers(list) {
   const seen = new Set();
-  for (const p of peers) {
-    if (p.sameTab || p.kind !== 'viewer') continue;
-    const st = p.presence?.g;
+  for (const p of list) {
+    const st = p.g;
     if (!Array.isArray(st) || st.length < 3 || !st.every(Number.isFinite)) continue;
     seen.add(p.peer);
     let o = others.get(p.peer);
@@ -1486,19 +1505,21 @@ function syncPeers(peers) {
   updateSubtitle();
 }
 (async () => {
-  if (!window.claude?.use) return;
+  if (!window.claude?.use || (CONFIG.SUPABASE_URL && CONFIG.SUPABASE_KEY)) return;
   room = await window.claude.use('room');
   if (!room) return;
-  room.onPeers(ch => syncPeers(ch.peers), () => { room = null; });
+  room.onPeers(ch => syncPeers(ch.peers.filter(p => !p.sameTab && p.kind === 'viewer').map(p => ({ peer: p.peer, g: p.presence?.g }))), () => { room = null; });
 })();
-let lastSent = '';
+let lastSent = '', lastSentAt = 0, channel = null;
 function sendPresence() {
-  if (!room) return;
+  if (!room && !channel) return;
   const g = [+player.position.x.toFixed(2), +player.position.z.toFixed(2), +player.rotation.y.toFixed(2)];
   const key = g.join(',');
   if (key === lastSent) return;
-  lastSent = key;
-  room.presence({ g }).catch(() => {});
+  if (channel && performance.now() - lastSentAt < 250) return;     // Supabase는 1초에 4번까지만
+  lastSent = key; lastSentAt = performance.now();
+  if (room) room.presence({ g }).catch(() => {});
+  if (channel) channel.track({ g }).catch(() => {});
 }
 function moveOthers(dt) {
   for (const o of others.values()) {
@@ -1511,7 +1532,101 @@ function moveOthers(dt) {
   }
 }
 
-/* ═════════ 20. 매 순간 그리기 ═════════ */
+/* ═════════ 20. 모두가 같은 정원 (Supabase) ═════════
+   CONFIG에 주소와 키가 있으면: 꽃은 서버의 flowers 표에 저장되고, 누가 심거나 물을 주면
+   모두의 화면에 바로 나타남. 함께 있는 사람의 위치는 Presence로 주고받음.
+   서버 쪽 준비는 supabase-setup.sql 파일 */
+const PLANT_ERRORS = { too_many: `한 사람당 ${CONFIG.MAX_FLOWERS}송이까지 심을 수 있어요`, garden_full: '정원이 가득 찼어요', too_close: '옆 꽃과 너무 가까워요' };
+const toFlower = r => ({ id: r.id, kind: r.kind, x: r.x, z: r.z, water: r.water, bloomed: r.bloomed ? Date.parse(r.bloomed) : null, last: myLast[r.id] || 0, mine: r.planted_by === me });
+
+function applyRow(r, fromOthers) {
+  const f = state.flowers.find(x => x.id === r.id);
+  if (!f) {
+    const nf = toFlower(r);
+    state.flowers.push(nf); placeFlower(nf);
+    flowerObjs.get(nf.id).pulse = 1;
+  } else {
+    const before = stageOf(f), more = r.water > f.water;
+    f.water = r.water; f.bloomed = r.bloomed ? Date.parse(r.bloomed) : null;
+    if (more && fromOthers) rain(f);                 // 다른 사람이 물을 준 것도 보임
+    if (stageOf(f) !== before) { refreshFlower(f); flowerObjs.get(f.id).pulse = 1; }
+  }
+  updateSubtitle();
+}
+function removeRow(id) {
+  const i = state.flowers.findIndex(x => x.id === id);
+  if (i < 0) return;
+  const o = flowerObjs.get(id);
+  if (o) { scene.remove(o.sprite, o.marker); flowerObjs.delete(id); }
+  state.flowers.splice(i, 1);
+  updateSubtitle();
+}
+
+async function plantOnline(kind, x, z) {
+  const { data, error } = await online.rpc('plant_flower', { p_kind: kind.id, p_x: x, p_z: z, p_visitor: me });
+  if (error) { const key = Object.keys(PLANT_ERRORS).find(k => (error.message || '').includes(k)); toast(PLANT_ERRORS[key] || '지금은 심을 수 없어요 · 잠시 뒤에 다시'); return; }
+  const row = Array.isArray(data) ? data[0] : data;
+  if (row) applyRow(row, false);
+  const left = CONFIG.MAX_FLOWERS - state.flowers.filter(f => f.mine).length;
+  if (left <= 0) setPlanting(false);
+  toast(`${kind.name}${josa(kind.name, '을', '를')} 심었어요 · 내 자리 ${Math.max(0, left)}송이 남음`);
+}
+
+async function waterOnline(f) {
+  const before = stageOf(f);
+  rain(f);
+  myLast[f.id] = f.last = Date.now();
+  const { data, error } = await online.rpc('water_flower', { p_id: f.id, p_visitor: me });
+  if (error || data === -2) { toast('지금은 물을 줄 수 없어요 · 잠시 뒤에 다시'); myLast[f.id] = f.last = 0; return; }
+  if (data === -1) { toast('조금 쉬었다가 다시 와요'); return; }
+  f.water = data;
+  if (stageOf(f) === 3 && !f.bloomed) f.bloomed = Date.now();
+  save(); updateSubtitle();
+  setTimeout(() => {
+    refreshFlower(f);
+    const after = stageOf(f);
+    if (after > before) { flowerObjs.get(f.id).pulse = 1; toast(['', '새싹이 났어요', '봉오리가 맺혔어요', '꽃이 피었어요 · 눌러서 가져가요'][after]); }
+    else toast(f.mine ? '물을 줬어요' : '친구 꽃에 물을 줬어요');
+  }, 700);
+}
+
+(async () => {
+  if (!CONFIG.SUPABASE_URL || !CONFIG.SUPABASE_KEY) return;
+  try {
+    const { createClient } = window.__supabaseForTest || await import('https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm');
+    const client = createClient(CONFIG.SUPABASE_URL, CONFIG.SUPABASE_KEY);
+    const { data, error } = await client.from('flowers').select('*');
+    if (error) throw error;
+
+    // 혼자 정원의 꽃을 치우고 모두의 정원으로 바꿈
+    online = client;
+    clearFlowers();
+    try { const p = JSON.parse(localStorage.getItem(CONFIG.STORAGE_KEY + '-online'))?.player; if (p) { state.player = p; player.position.set(p.x, 0, p.z); camYaw = p.yaw || 0; } } catch (e) {}
+    state.flowers = data.map(toFlower);
+    state.flowers.forEach(placeFlower);
+    document.getElementById('reset').style.display = 'none';
+    updateSubtitle();
+    toast('모두의 정원에 들어왔어요');
+
+    channel = client.channel('garden', { config: { presence: { key: me } } });
+    channel
+      .on('presence', { event: 'sync' }, () => {
+        const st = channel.presenceState(), list = [];
+        for (const key in st) { if (key !== me) { const metas = st[key]; list.push({ peer: key, g: metas[metas.length - 1]?.g }); } }
+        syncPeers(list);
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'flowers' }, ev => {
+        if (ev.eventType === 'DELETE') removeRow(ev.old.id);
+        else applyRow(ev.new, true);
+      })
+      .subscribe();
+  } catch (e) {
+    console.warn('Supabase 연결 실패, 혼자 정원으로 계속', e);
+    toast('모두의 정원에 연결하지 못했어요 · 혼자 정원으로 열렸어요');
+  }
+})();
+
+/* ═════════ 21. 매 순간 그리기 ═════════ */
 const clock = new THREE.Clock();
 let saveTimer = 0, mapTimer = 0, time = 0;
 function frame() {
